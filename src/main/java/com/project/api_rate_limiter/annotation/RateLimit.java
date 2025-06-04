@@ -12,4 +12,15 @@ public @interface RateLimit {
     int limit() default 0;
     int timeWindowSeconds() default 0;
     String key() default "";
+    
+    // Type of rate limiting
+    RateLimitType type() default RateLimitType.GLOBAL;
+    
+    // Specify which HTTP methods the rate limit applies to
+    String[] methods() default {};
+    
+    // DDoS protection settings
+    boolean ddosProtection() default false;
+    int ddosThreshold() default 1000;
+    int ddosBanDurationSeconds() default 3600; // 1 hour by default
 } 

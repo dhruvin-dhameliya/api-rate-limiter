@@ -1,6 +1,8 @@
 package com.project.api_rate_limiter.config;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -34,6 +36,30 @@ public class RateLimitConfig implements EnvironmentAware {
     
     // Whether to enable rate limiting globally
     private boolean enabled = true;
+    
+    // IP whitelist and blacklist settings
+    private List<String> whitelistedIps = new ArrayList<>();
+    private List<String> blacklistedIps = new ArrayList<>();
+    private boolean enableIpFiltering = true;
+    
+    // DDoS protection settings
+    private boolean ddosProtectionEnabled = false;
+    private int ddosThreshold = 1000;
+    private int ddosBanDurationSeconds = 3600; // 1 hour
+    private int ddosCountResetIntervalSeconds = 60; // 1 minute
+    
+    // HTTP method-specific rate limits
+    private Map<String, Integer> methodLimits = new HashMap<>();
+    
+    // User-based rate limiting settings
+    private boolean userBasedLimitingEnabled = false;
+    private int defaultUserLimit = 50;
+    private int defaultUserTimeWindowSeconds = 60;
+    
+    // API key rate limiting settings
+    private boolean apiKeyBasedLimitingEnabled = false;
+    private int defaultApiKeyLimit = 200;
+    private int defaultApiKeyTimeWindowSeconds = 60;
     
     // Endpoint-specific rate limits
     private Map<String, EndpointLimit> endpoints = new HashMap<>();
@@ -70,9 +96,16 @@ public class RateLimitConfig implements EnvironmentAware {
         effectiveLimit.setLimit(endpointLimit.getLimit());
         effectiveLimit.setTimeWindowSeconds(endpointLimit.getTimeWindowSeconds());
         effectiveLimit.setEnabled(endpointLimit.isEnabled());
+        effectiveLimit.setUserLimit(endpointLimit.getUserLimit());
+        effectiveLimit.setUserTimeWindowSeconds(endpointLimit.getUserTimeWindowSeconds());
+        effectiveLimit.setApiKeyLimit(endpointLimit.getApiKeyLimit());
+        effectiveLimit.setApiKeyTimeWindowSeconds(endpointLimit.getApiKeyTimeWindowSeconds());
+        effectiveLimit.setMethodLimits(new HashMap<>(endpointLimit.getMethodLimits()));
+        effectiveLimit.setWhitelistedIps(new ArrayList<>(endpointLimit.getWhitelistedIps()));
+        effectiveLimit.setBlacklistedIps(new ArrayList<>(endpointLimit.getBlacklistedIps()));
         
         // Check environment variables for endpoint-specific values (highest priority)
-        String envPrefix = "RATE_LIMITER_ENDPOINTS_" + endpoint.toUpperCase() + "_";
+        String envPrefix = "RATE_LIMITER_ENDPOINTS_" + endpoint.toUpperCase().replace('-', '_').replace('/', '_') + "_";
         
         // Get limit from environment variable
         String envLimitKey = envPrefix + "LIMIT";
@@ -102,6 +135,29 @@ public class RateLimitConfig implements EnvironmentAware {
         if (envEnabledValue != null && !envEnabledValue.isEmpty()) {
             effectiveLimit.setEnabled(Boolean.parseBoolean(envEnabledValue));
         }
+        
+        // Get user limit settings
+        String envUserLimitKey = envPrefix + "USER_LIMIT";
+        String envUserLimitValue = environment.getProperty(envUserLimitKey);
+        if (envUserLimitValue != null && !envUserLimitValue.isEmpty()) {
+            try {
+                effectiveLimit.setUserLimit(Integer.parseInt(envUserLimitValue));
+            } catch (NumberFormatException e) {
+                // Log error
+            }
+        }
+        
+        // Get API key limit settings
+        String envApiKeyLimitKey = envPrefix + "API_KEY_LIMIT";
+        String envApiKeyLimitValue = environment.getProperty(envApiKeyLimitKey);
+        if (envApiKeyLimitValue != null && !envApiKeyLimitValue.isEmpty()) {
+            try {
+                effectiveLimit.setApiKeyLimit(Integer.parseInt(envApiKeyLimitValue));
+            } catch (NumberFormatException e) {
+                // Log error
+            }
+        }
+        
         return effectiveLimit;
     }
 
@@ -152,11 +208,72 @@ public class RateLimitConfig implements EnvironmentAware {
         }
         return defaultTimeWindowSeconds;
     }
+    
+    /**
+     * Get effective DDoS protection settings from environment variables or properties.
+     */
+    public boolean getEffectiveDdosProtectionEnabled() {
+        String envKey = "RATE_LIMITER_DDOS_PROTECTION_ENABLED";
+        String envValue = environment.getProperty(envKey);
+        if (envValue != null && !envValue.isEmpty()) {
+            return Boolean.parseBoolean(envValue);
+        }
+        
+        String propKey = "rate-limiter.ddos-protection-enabled";
+        String propValue = environment.getProperty(propKey);
+        if (propValue != null && !propValue.isEmpty()) {
+            return Boolean.parseBoolean(propValue);
+        }
+        
+        return ddosProtectionEnabled;
+    }
+    
+    /**
+     * Get effective DDoS threshold from environment variables or properties.
+     */
+    public int getEffectiveDdosThreshold() {
+        String envKey = "RATE_LIMITER_DDOS_THRESHOLD";
+        String envValue = environment.getProperty(envKey);
+        if (envValue != null && !envValue.isEmpty()) {
+            try {
+                return Integer.parseInt(envValue);
+            } catch (NumberFormatException e) {
+                // Log error
+            }
+        }
+        
+        String propKey = "rate-limiter.ddos-threshold";
+        String propValue = environment.getProperty(propKey);
+        if (propValue != null && !propValue.isEmpty()) {
+            try {
+                return Integer.parseInt(propValue);
+            } catch (NumberFormatException e) {
+                // Log error
+            }
+        }
+        
+        return ddosThreshold;
+    }
 
     @Data
     public static class EndpointLimit {
         private int limit;
         private int timeWindowSeconds;
         private boolean enabled = true;
+        
+        // User-based rate limiting settings for this endpoint
+        private int userLimit;
+        private int userTimeWindowSeconds;
+        
+        // API key-based rate limiting settings for this endpoint
+        private int apiKeyLimit;
+        private int apiKeyTimeWindowSeconds;
+        
+        // HTTP method-specific rate limits for this endpoint
+        private Map<String, Integer> methodLimits = new HashMap<>();
+        
+        // Endpoint-specific whitelist and blacklist
+        private List<String> whitelistedIps = new ArrayList<>();
+        private List<String> blacklistedIps = new ArrayList<>();
     }
 } 

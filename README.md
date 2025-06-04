@@ -1,29 +1,19 @@
-# API Rate Limiter for Microservices
+# Spring Boot API Rate Limiter Library
 
-A dynamic and scalable rate limiting library for Spring Boot applications, designed to be easily integrated into microservices architectures. This library provides flexible configuration options and can be customized per API endpoint or for global API limits.
+A comprehensive Spring Boot rate limiting library with security features.
 
 ## Features
+- **Default rate limiting** (global configuration)
+- **Endpoint-specific rate limiting**
+- **IP-based rate limiting**
+- **User-based rate limiting**
+- **API key-based rate limiting**
+- **Support for different HTTP methods** (GET, POST, PUT, DELETE)
+- **DDoS protection**
 
-- **Dynamic Rate Limiting per API Endpoint**: Define different rate limits for various endpoints with easy configuration.
-- **Multiple Algorithms**: Choose between Token Bucket and Sliding Window algorithms.
-- **Granular Time Intervals**: Control API usage with configurable time windows.
-- **Distributed Rate Limiting**: Optional Redis support for distributed environments.
-- **Intelligent Failure Handling**: Custom retry mechanisms with helpful error messages.
-- **Annotation-based Limiting**: Simple `@RateLimit` annotation for method-level control.
-- **Global Filter Option**: Enable rate limiting for all endpoints with a servlet filter.
+## Installation
 
-## Getting Started
-
-### Prerequisites
-
-- Java 17 or higher
-- Spring Boot 3.x
-- Maven or Gradle
-- Redis (optional, for distributed rate limiting)
-
-### Installation
-
-Add the dependency to your project:
+Add the dependency to your Maven project:
 
 ```xml
 <dependency>
@@ -33,95 +23,198 @@ Add the dependency to your project:
 </dependency>
 ```
 
-### Basic Configuration
+## Configuration
 
-Add the following to your `application.properties` or `application.yml`:
+Configure the rate limiter in your `application.properties` (or `application.yml`) file:
 
 ```properties
-# Enable/Disable Rate Limiting
+# Enable/disable rate limiting globally
 rate-limiter.enabled=true
 
-# Default Algorithm (TOKEN_BUCKET or SLIDING_WINDOW)
-rate-limiter.default-algorithm=TOKEN_BUCKET
-
-# Default Rate Limit (requests per time window)
+# Default rate limit for all endpoints
 rate-limiter.default-limit=100
-
-# Default Time Window (in seconds)
 rate-limiter.default-time-window-seconds=60
 
-# Enable Redis for distributed rate limiting
+# Enable Redis for distributed rate limiting (optional)
 rate-limiter.enable-redis=false
-```
 
-### Endpoint-Specific Configuration
+# DDoS protection settings
+rate-limiter.ddos-protection-enabled=true
+rate-limiter.ddos-threshold=1000
+rate-limiter.ddos-ban-duration-seconds=3600
+rate-limiter.ddos-count-reset-interval-seconds=60
 
-```properties
-# Configuration for /login endpoint
-rate-limiter.endpoints.login.limit=5
-rate-limiter.endpoints.login.time-window-seconds=60
-rate-limiter.endpoints.login.algorithm=SLIDING_WINDOW
+# User-based rate limiting settings
+rate-limiter.user-based-limiting-enabled=true
+rate-limiter.default-user-limit=50
+rate-limiter.default-user-time-window-seconds=60
 
-# Configuration for /search endpoint
-rate-limiter.endpoints.search.limit=200
-rate-limiter.endpoints.search.time-window-seconds=60
+# API key-based rate limiting settings
+rate-limiter.api-key-based-limiting-enabled=true
+rate-limiter.default-api-key-limit=200
+rate-limiter.default-api-key-time-window-seconds=60
+
+# Endpoint-specific rate limits
+rate-limiter.endpoints.login.limit=10
+rate-limiter.endpoints.login.time-window-seconds=120
+rate-limiter.endpoints.login.enabled=true
+
+# Method-specific rate limits for an endpoint
+rate-limiter.endpoints.api-data.method-limits.POST=20
+rate-limiter.endpoints.api-data.method-limits.PUT=30
+rate-limiter.endpoints.api-data.method-limits.DELETE=10
+
+# User-specific rate limits for an endpoint
+rate-limiter.endpoints.private-data.user-limit=20
+rate-limiter.endpoints.private-data.user-time-window-seconds=60
+
+# API key specific rate limits for an endpoint
+rate-limiter.endpoints.api-service.api-key-limit=100
+rate-limiter.endpoints.api-service.api-key-time-window-seconds=60
 ```
 
 ## Usage
 
-### Using the Annotation
+### Basic Rate Limiting
+
+The library applies rate limiting automatically to all endpoints once added to your project. You can customize the behavior using the `@RateLimit` annotation.
+
+### Using the @RateLimit Annotation
+
+Apply rate limiting to a specific controller or method:
 
 ```java
+import com.project.api_rate_limiter.annotation.RateLimit;
+import com.project.api_rate_limiter.annotation.RateLimitType;
+
 @RestController
-public class UserController {
-    
-    // Basic usage - uses default configuration
-    @RateLimit
-    @GetMapping("/users")
-    public List<User> getUsers() {
-        // ...
+@RequestMapping("/api")
+public class ApiController {
+
+    // Apply rate limiting to a specific endpoint
+    @GetMapping("/data")
+    @RateLimit(limit = 50, timeWindowSeconds = 60, type = RateLimitType.IP_BASED)
+    public ResponseEntity<Object> getData() {
+        // Your code here
+        return ResponseEntity.ok().build();
     }
     
-    // Custom rate limit for this endpoint
-    @RateLimit(value = "login", limit = 5, timeWindowSeconds = 60)
+    // Apply rate limiting to a specific HTTP method
+    @PostMapping("/data")
+    @RateLimit(limit = 20, timeWindowSeconds = 60, methods = {"POST"}, 
+              type = RateLimitType.METHOD_BASED)
+    public ResponseEntity<Object> postData() {
+        // Your code here
+        return ResponseEntity.ok().build();
+    }
+    
+    // Apply user-based rate limiting
+    @GetMapping("/user-data")
+    @RateLimit(limit = 30, timeWindowSeconds = 60, type = RateLimitType.USER_BASED)
+    public ResponseEntity<Object> getUserData() {
+        // Your code here
+        return ResponseEntity.ok().build();
+    }
+    
+    // Apply API key-based rate limiting
+    @GetMapping("/service")
+    @RateLimit(limit = 100, timeWindowSeconds = 60, type = RateLimitType.API_KEY_BASED)
+    public ResponseEntity<Object> getService() {
+        // Your code here
+        return ResponseEntity.ok().build();
+    }
+    
+    // Apply DDoS protection
     @PostMapping("/login")
-    public TokenResponse login(@RequestBody LoginRequest request) {
-        // ...
-    }
-    
-    // Rate limit based on user ID
-    @RateLimit(key = "#userId")
-    @GetMapping("/users/{userId}")
-    public User getUser(@PathVariable String userId) {
-        // ...
+    @RateLimit(limit = 5, timeWindowSeconds = 60, type = RateLimitType.IP_BASED, 
+              ddosProtection = true, ddosThreshold = 20, ddosBanDurationSeconds = 1800)
+    public ResponseEntity<Object> login() {
+        // Your code here
+        return ResponseEntity.ok().build();
     }
 }
 ```
 
-### Using Redis for Distributed Rate Limiting
+You can also apply rate limiting to an entire controller:
 
-To enable Redis-based rate limiting, configure Redis and set `rate-limiter.enable-redis=true` in your properties.
-
-```properties
-rate-limiter.enable-redis=true
-spring.data.redis.host=localhost
-spring.data.redis.port=6379
+```java
+@RestController
+@RequestMapping("/api")
+@RateLimit(limit = 100, timeWindowSeconds = 60, type = RateLimitType.IP_BASED)
+public class ApiController {
+    // All methods in this controller will be rate-limited
+}
 ```
 
-## Algorithms
+### Rate Limit Types
 
-### Token Bucket
+The library supports various types of rate limiting:
 
-The Token Bucket algorithm uses a bucket that continuously fills with tokens at a constant rate. Each request consumes one token, and if there are no tokens available, the request is rejected. This algorithm allows for bursts of traffic up to the bucket size.
+- `RateLimitType.GLOBAL` - Global rate limiting for all requests
+- `RateLimitType.IP_BASED` - Rate limiting based on client IP address
+- `RateLimitType.USER_BASED` - Rate limiting based on authenticated user
+- `RateLimitType.API_KEY_BASED` - Rate limiting based on API key
+- `RateLimitType.METHOD_BASED` - Rate limiting specific to HTTP method
+- `RateLimitType.ENDPOINT_BASED` - Endpoint-specific rate limiting
 
-### Sliding Window
+### API Key Management
 
-The Sliding Window algorithm tracks requests in a sliding time window. It provides more accurate rate limiting by considering the distribution of requests over time.
+To use API key-based rate limiting:
+
+```java
+@RestController
+@RequestMapping("/api-keys")
+public class ApiKeyController {
+
+    @Autowired
+    private ApiKeyService apiKeyService;
+    
+    @PostMapping("/generate")
+    public ResponseEntity<ApiKey> generateApiKey(@RequestParam String owner, 
+                                               @RequestParam int rateLimit,
+                                               @RequestParam int timeWindowSeconds,
+                                               @RequestParam int expiryDays) {
+        ApiKey apiKey = apiKeyService.generateApiKey(owner, rateLimit, timeWindowSeconds, expiryDays);
+        return ResponseEntity.ok(apiKey);
+    }
+    
+    @PostMapping("/revoke")
+    public ResponseEntity<Boolean> revokeApiKey(@RequestParam String key) {
+        boolean revoked = apiKeyService.revokeApiKey(key);
+        return ResponseEntity.ok(revoked);
+    }
+}
+```
+
+When using API keys, clients should include the API key in the `X-API-Key` header.
+
+### DDoS Protection
+
+The library includes DDoS protection that can be enabled globally or for specific endpoints. When a client exceeds the DDoS threshold, they will be temporarily banned for the specified duration.
+
+## Environment Variables
+
+All configuration properties can also be set via environment variables:
+
+- `RATE_LIMITER_ENABLED` - Enable/disable rate limiting globally
+- `RATE_LIMITER_DEFAULT_LIMIT` - Default rate limit for all endpoints
+- `RATE_LIMITER_DEFAULT_TIME_WINDOW_SECONDS` - Default time window in seconds
+- `RATE_LIMITER_ENABLE_REDIS` - Enable Redis for distributed rate limiting
+- `RATE_LIMITER_DDOS_PROTECTION_ENABLED` - Enable DDoS protection
+- `RATE_LIMITER_DDOS_THRESHOLD` - DDoS threshold
+- `RATE_LIMITER_DDOS_BAN_DURATION_SECONDS` - DDoS ban duration
+- `RATE_LIMITER_ENDPOINTS_<ENDPOINT>_LIMIT` - Endpoint-specific rate limit
+- `RATE_LIMITER_ENDPOINTS_<ENDPOINT>_TIME_WINDOW_SECONDS` - Endpoint-specific time window
+- `RATE_LIMITER_ENDPOINTS_<ENDPOINT>_ENABLED` - Enable/disable rate limiting for specific endpoint
+
+## Distributed Rate Limiting with Redis
+
+To enable distributed rate limiting with Redis, set `rate-limiter.enable-redis=true` and ensure Redis is properly configured in your Spring Boot application.
 
 ## Exception Handling
 
-When a rate limit is exceeded, a `RateLimitExceededException` is thrown with details about the wait time. The exception is handled to return a 429 Too Many Requests status with a Retry-After header.
+The library throws a `RateLimitExceededException` when a client exceeds the rate limit. This exception is automatically handled by the filter, which returns a 429 (Too Many Requests) response with a "Retry-After" header.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+[MIT License](LICENSE) 
