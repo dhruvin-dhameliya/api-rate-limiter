@@ -16,6 +16,7 @@ import org.springframework.web.context.request.ServletRequestAttributes;
 
 import com.project.api_rate_limiter.annotation.RateLimit;
 import com.project.api_rate_limiter.exception.RateLimitExceededException;
+import com.project.api_rate_limiter.filter.RateLimitFilter;
 import com.project.api_rate_limiter.service.RateLimiterService;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -35,42 +36,65 @@ public class RateLimitAspect {
     public Object rateLimit(ProceedingJoinPoint joinPoint) throws Throwable {
         MethodSignature signature = (MethodSignature) joinPoint.getSignature();
         Method method = signature.getMethod();
-        
+
         RateLimit rateLimitAnnotation = method.getAnnotation(RateLimit.class);
         if (rateLimitAnnotation == null) {
             rateLimitAnnotation = method.getDeclaringClass().getAnnotation(RateLimit.class);
         }
-        
-        if (rateLimitAnnotation != null) {
-            String endpoint = rateLimitAnnotation.value().isEmpty() 
-                    ? method.getName() 
-                    : rateLimitAnnotation.value();
-            String clientId = getClientId(joinPoint, rateLimitAnnotation, signature);
-            
-            try {
-                rateLimiterService.allowRequest(clientId, endpoint, 
-                    rateLimitAnnotation.limit(), 
-                    rateLimitAnnotation.timeWindowSeconds());
-            } catch (RateLimitExceededException e) {
-                log.warn("Rate limit exceeded for client {} on endpoint {}: {}", 
-                        clientId, endpoint, e.getMessage());
-                throw e;
-            }
+
+        if (rateLimitAnnotation == null) {
+            return joinPoint.proceed();
+        }
+
+        HttpServletRequest request = currentRequest();
+
+        // Mirror the filter's methods() check so HTTP methods excluded by
+        // @RateLimit(methods = ...) are not enforced here either.
+        if (request != null
+                && rateLimitAnnotation.methods().length > 0
+                && !rateLimiterService.isMethodAllowed(request, rateLimitAnnotation.methods())) {
+            return joinPoint.proceed();
+        }
+
+        // Filter is the single source of truth for controller methods;
+        // the aspect still fires for service-bean methods called outside a request.
+        if (request != null && Boolean.TRUE.equals(request.getAttribute(RateLimitFilter.ENFORCED_ATTRIBUTE))) {
+            return joinPoint.proceed();
+        }
+
+        String endpoint = rateLimitAnnotation.value().isEmpty()
+                ? method.getName()
+                : rateLimitAnnotation.value();
+        String clientId = resolveClientId(joinPoint, rateLimitAnnotation, signature, request);
+
+        try {
+            rateLimiterService.allowRequestWithType(
+                    clientId,
+                    endpoint,
+                    rateLimitAnnotation.limit(),
+                    rateLimitAnnotation.timeWindowSeconds(),
+                    rateLimitAnnotation.type(),
+                    request);
+        } catch (RateLimitExceededException e) {
+            log.warn("Rate limit exceeded for client {} on endpoint {}: {}",
+                    clientId, endpoint, e.getMessage());
+            throw e;
         }
 
         return joinPoint.proceed();
     }
 
-    private String getClientId(ProceedingJoinPoint joinPoint, RateLimit annotation, MethodSignature signature) {
+    /** SpEL key when the annotation supplies one; otherwise the client IP. */
+    private String resolveClientId(ProceedingJoinPoint joinPoint,
+                                   RateLimit annotation,
+                                   MethodSignature signature,
+                                   HttpServletRequest request) {
         if (!annotation.key().isEmpty()) {
             try {
-                String key = annotation.key();
-                Expression expression = parser.parseExpression(key);
-
+                Expression expression = parser.parseExpression(annotation.key());
                 StandardEvaluationContext context = new StandardEvaluationContext();
                 String[] paramNames = signature.getParameterNames();
                 Object[] args = joinPoint.getArgs();
-                
                 if (paramNames != null) {
                     for (int i = 0; i < paramNames.length; i++) {
                         context.setVariable(paramNames[i], args[i]);
@@ -81,38 +105,15 @@ public class RateLimitAspect {
                 log.error("Error evaluating rate limit key: {}", e.getMessage());
             }
         }
-        return getClientIp();
+        return request != null ? RateLimitFilter.extractClientIp(request) : "unknown";
     }
-    
-    // Get the client IP address from the request
-    private String getClientIp() {
+
+    private HttpServletRequest currentRequest() {
         try {
             ServletRequestAttributes attributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
-            if (attributes != null) {
-                HttpServletRequest request = attributes.getRequest();
-                
-                // get the real IP if behind a proxy
-                String ip = request.getHeader("X-Forwarded-For");
-                if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-                    ip = request.getHeader("Proxy-Client-IP");
-                }
-                if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-                    ip = request.getHeader("WL-Proxy-Client-IP");
-                }
-                if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-                    ip = request.getHeader("HTTP_CLIENT_IP");
-                }
-                if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-                    ip = request.getHeader("HTTP_X_FORWARDED_FOR");
-                }
-                if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-                    ip = request.getRemoteAddr();
-                }
-                return ip;
-            }
+            return attributes != null ? attributes.getRequest() : null;
         } catch (Exception e) {
-            log.error("Error getting client IP: {}", e.getMessage());
+            return null;
         }
-        return "unknown";
     }
-} 
+}

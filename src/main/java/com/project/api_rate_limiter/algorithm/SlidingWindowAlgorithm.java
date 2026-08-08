@@ -10,13 +10,13 @@ import org.springframework.stereotype.Component;
 @Component
 public class SlidingWindowAlgorithm implements RateLimitAlgorithm {
 
+    private final Map<String, Queue<Long>> requestTimestamps = new ConcurrentHashMap<>();
+
     public int getRemainingRequests(String key, int maxRequests) {
         Queue<Long> timestamps = requestTimestamps.get(key);
         if (timestamps == null) return maxRequests;
         return Math.max(0, maxRequests - timestamps.size());
     }
-
-    private final Map<String, Queue<Long>> requestTimestamps = new ConcurrentHashMap<>();
 
     @Override
     public boolean allowRequest(String key, int maxRequests, int timeWindowSeconds) {
@@ -35,13 +35,15 @@ public class SlidingWindowAlgorithm implements RateLimitAlgorithm {
     }
 
     @Override
-    public long getWaitTimeSeconds(String key) {
+    public long getWaitTimeSeconds(String key, int timeWindowSeconds) {
         Queue<Long> timestamps = requestTimestamps.get(key);
         if (timestamps == null || timestamps.isEmpty()) return 0;
         Long oldestTimestamp = timestamps.peek();
         if (oldestTimestamp == null) return 0;
         long currentTime = System.currentTimeMillis();
-        long waitTimeMs = Math.max(0, oldestTimestamp - (currentTime - 60000));
-        return waitTimeMs / 1000;
+        long windowMs = timeWindowSeconds * 1000L;
+        long waitTimeMs = Math.max(0, oldestTimestamp - (currentTime - windowMs));
+        // Ceiling: rounding down would let clients retry too early and hit the limit again.
+        return (waitTimeMs + 999) / 1000;
     }
 }

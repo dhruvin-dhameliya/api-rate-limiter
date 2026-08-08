@@ -10,52 +10,49 @@ import org.springframework.context.EnvironmentAware;
 import org.springframework.core.env.Environment;
 
 import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
 
 /**
- * Configuration properties for rate limiting.
- * 1. Environment variables (highest priority)
- *    - Format: RATE_LIMITER_DEFAULT_LIMIT, RATE_LIMITER_ENDPOINTS_LOGIN_LIMIT, etc.
- * 2. application.properties values
- *    - Format: rate-limiter.default-limit, rate-limiter.endpoints.login.limit, etc.
- * 3. Annotation values (from @RateLimit)
- * 4. Default hardcoded values (lowest priority)
+ * Rate-limiter configuration. Precedence, highest first:
+ * environment variables, application properties, {@code @RateLimit} annotation,
+ * defaults defined here.
  */
 @Data
+@Slf4j
 @ConfigurationProperties(prefix = "rate-limiter")
 public class RateLimitConfig implements EnvironmentAware {
-    
-    private Environment environment;
-    
-    // Default rate limit for all endpoints (if not specified)
-    private int defaultLimit = 100;
 
+    private Environment environment;
+
+    private int defaultLimit = 100;
     private int defaultTimeWindowSeconds = 60;
 
-    private boolean enableRedis = false;
-    
-    // Whether to enable rate limiting globally
     private boolean enabled = true;
-    
-    // IP whitelist and blacklist settings
+    private boolean enableRedis = false;
+    private boolean enableIpFiltering = true;
+
     private List<String> whitelistedIps = new ArrayList<>();
     private List<String> blacklistedIps = new ArrayList<>();
-    private boolean enableIpFiltering = true;
-    
-    // DDoS protection settings
+
+    /**
+     * When non-empty, proxy headers ({@code X-Forwarded-For} et al.) are only
+     * honoured if the immediate connection came from one of these IPs. When
+     * empty, proxy headers are trusted unconditionally — safe only for local
+     * development; set this in production behind a load balancer.
+     */
+    private List<String> trustedProxies = new ArrayList<>();
+
     private boolean ddosProtectionEnabled = false;
     private int ddosThreshold = 1000;
-    private int ddosBanDurationSeconds = 3600; // 1 hour
-    private int ddosCountResetIntervalSeconds = 60; // 1 minute
-    
-    // HTTP method-specific rate limits
+    private int ddosBanDurationSeconds = 3600;
+    private int ddosCountResetIntervalSeconds = 60;
+
     private Map<String, Integer> methodLimits = new HashMap<>();
-    
-    // User-based rate limiting settings
+
     private boolean userBasedLimitingEnabled = false;
     private int defaultUserLimit = 50;
     private int defaultUserTimeWindowSeconds = 60;
-    
-    // API key rate limiting settings
+
     private boolean apiKeyBasedLimitingEnabled = false;
     private int defaultApiKeyLimit = 200;
     private int defaultApiKeyTimeWindowSeconds = 60;
@@ -66,29 +63,24 @@ public class RateLimitConfig implements EnvironmentAware {
         "api_key",
         "key"
     ));
-    
-    // Endpoint-specific rate limits
+
     private Map<String, EndpointLimit> endpoints = new HashMap<>();
-    
+
     @Override
     public void setEnvironment(Environment environment) {
         this.environment = environment;
     }
 
     private String getEffectiveValue(String propertyName, String defaultValue) {
-        // Check environment variable first (highest priority)
         String envVarName = propertyName.toUpperCase().replace('.', '_').replace('-', '_');
         String envValue = environment.getProperty(envVarName);
         if (envValue != null && !envValue.isEmpty()) {
             return envValue;
         }
-        
-        // Then check application properties
         String propValue = environment.getProperty(propertyName);
         if (propValue != null && !propValue.isEmpty()) {
             return propValue;
         }
-
         return defaultValue;
     }
 
@@ -110,201 +102,90 @@ public class RateLimitConfig implements EnvironmentAware {
         effectiveLimit.setWhitelistedIps(new ArrayList<>(endpointLimit.getWhitelistedIps()));
         effectiveLimit.setBlacklistedIps(new ArrayList<>(endpointLimit.getBlacklistedIps()));
         
-        // Check environment variables for endpoint-specific values (highest priority)
         String envPrefix = "RATE_LIMITER_ENDPOINTS_" + endpoint.toUpperCase().replace('-', '_').replace('/', '_') + "_";
-        
-        // Get limit from environment variable
-        String envLimitKey = envPrefix + "LIMIT";
-        String envLimitValue = environment.getProperty(envLimitKey);
-        if (envLimitValue != null && !envLimitValue.isEmpty()) {
-            try {
-                effectiveLimit.setLimit(Integer.parseInt(envLimitValue));
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        
-        // Get time window from environment variable
-        String envTimeWindowKey = envPrefix + "TIME_WINDOW_SECONDS";
-        String envTimeWindowValue = environment.getProperty(envTimeWindowKey);
-        if (envTimeWindowValue != null && !envTimeWindowValue.isEmpty()) {
-            try {
-                effectiveLimit.setTimeWindowSeconds(Integer.parseInt(envTimeWindowValue));
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        
-        // Get enabled flag from environment variable
-        String envEnabledKey = envPrefix + "ENABLED";
-        String envEnabledValue = environment.getProperty(envEnabledKey);
+
+        Integer envLimit = parseIntProperty(envPrefix + "LIMIT");
+        if (envLimit != null) effectiveLimit.setLimit(envLimit);
+
+        Integer envTimeWindow = parseIntProperty(envPrefix + "TIME_WINDOW_SECONDS");
+        if (envTimeWindow != null) effectiveLimit.setTimeWindowSeconds(envTimeWindow);
+
+        Integer envUserLimit = parseIntProperty(envPrefix + "USER_LIMIT");
+        if (envUserLimit != null) effectiveLimit.setUserLimit(envUserLimit);
+
+        Integer envApiKeyLimit = parseIntProperty(envPrefix + "API_KEY_LIMIT");
+        if (envApiKeyLimit != null) effectiveLimit.setApiKeyLimit(envApiKeyLimit);
+
+        String envEnabledValue = environment.getProperty(envPrefix + "ENABLED");
         if (envEnabledValue != null && !envEnabledValue.isEmpty()) {
             effectiveLimit.setEnabled(Boolean.parseBoolean(envEnabledValue));
         }
-        
-        // Get user limit settings
-        String envUserLimitKey = envPrefix + "USER_LIMIT";
-        String envUserLimitValue = environment.getProperty(envUserLimitKey);
-        if (envUserLimitValue != null && !envUserLimitValue.isEmpty()) {
-            try {
-                effectiveLimit.setUserLimit(Integer.parseInt(envUserLimitValue));
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        
-        // Get API key limit settings
-        String envApiKeyLimitKey = envPrefix + "API_KEY_LIMIT";
-        String envApiKeyLimitValue = environment.getProperty(envApiKeyLimitKey);
-        if (envApiKeyLimitValue != null && !envApiKeyLimitValue.isEmpty()) {
-            try {
-                effectiveLimit.setApiKeyLimit(Integer.parseInt(envApiKeyLimitValue));
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        
+
         return effectiveLimit;
     }
 
     public int getEffectiveDefaultLimit() {
-        // Check environment variable first (highest priority)
-        String envKey = "RATE_LIMITER_DEFAULT_LIMIT";
-        String envValue = environment.getProperty(envKey);
-        if (envValue != null && !envValue.isEmpty()) {
-            try {
-                return Integer.parseInt(envValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        
-        // Then check application.properties
-        String propKey = "rate-limiter.default-limit";
-        String propValue = environment.getProperty(propKey);
-        if (propValue != null && !propValue.isEmpty()) {
-            try {
-                return Integer.parseInt(propValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        return defaultLimit;
+        return readIntProperty("RATE_LIMITER_DEFAULT_LIMIT", "rate-limiter.default-limit", defaultLimit);
     }
 
     public int getEffectiveDefaultTimeWindowSeconds() {
-        String envKey = "RATE_LIMITER_DEFAULT_TIME_WINDOW_SECONDS";
-        String envValue = environment.getProperty(envKey);
-        if (envValue != null && !envValue.isEmpty()) {
-            try {
-                return Integer.parseInt(envValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-
-        String propKey = "rate-limiter.default-time-window-seconds";
-        String propValue = environment.getProperty(propKey);
-        if (propValue != null && !propValue.isEmpty()) {
-            try {
-                return Integer.parseInt(propValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        return defaultTimeWindowSeconds;
+        return readIntProperty("RATE_LIMITER_DEFAULT_TIME_WINDOW_SECONDS",
+                "rate-limiter.default-time-window-seconds", defaultTimeWindowSeconds);
     }
-    
-    /**
-     * Get effective DDoS protection settings from environment variables or properties.
-     */
+
     public boolean getEffectiveDdosProtectionEnabled() {
-        String envKey = "RATE_LIMITER_DDOS_PROTECTION_ENABLED";
-        String envValue = environment.getProperty(envKey);
+        String envValue = environment.getProperty("RATE_LIMITER_DDOS_PROTECTION_ENABLED");
         if (envValue != null && !envValue.isEmpty()) {
             return Boolean.parseBoolean(envValue);
         }
-        
-        String propKey = "rate-limiter.ddos-protection-enabled";
-        String propValue = environment.getProperty(propKey);
+        String propValue = environment.getProperty("rate-limiter.ddos-protection-enabled");
         if (propValue != null && !propValue.isEmpty()) {
             return Boolean.parseBoolean(propValue);
         }
-        
         return ddosProtectionEnabled;
     }
-    
-    /**
-     * Get effective DDoS threshold from environment variables or properties.
-     */
+
     public int getEffectiveDdosThreshold() {
-        String envKey = "RATE_LIMITER_DDOS_THRESHOLD";
-        String envValue = environment.getProperty(envKey);
-        if (envValue != null && !envValue.isEmpty()) {
-            try {
-                return Integer.parseInt(envValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        
-        String propKey = "rate-limiter.ddos-threshold";
-        String propValue = environment.getProperty(propKey);
-        if (propValue != null && !propValue.isEmpty()) {
-            try {
-                return Integer.parseInt(propValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        
-        return ddosThreshold;
+        return readIntProperty("RATE_LIMITER_DDOS_THRESHOLD", "rate-limiter.ddos-threshold", ddosThreshold);
+    }
+
+    public int getEffectiveDdosBanDurationSeconds() {
+        return readIntProperty("RATE_LIMITER_DDOS_BAN_DURATION_SECONDS",
+                "rate-limiter.ddos-ban-duration-seconds", ddosBanDurationSeconds);
+    }
+
+    public int getEffectiveDdosCountResetIntervalSeconds() {
+        return readIntProperty("RATE_LIMITER_DDOS_COUNT_RESET_INTERVAL_SECONDS",
+                "rate-limiter.ddos-count-reset-interval-seconds", ddosCountResetIntervalSeconds);
     }
 
     public int getEffectiveDefaultApiKeyLimit() {
-        String envKey = "RATE_LIMITER_DEFAULT_API_KEY_LIMIT";
-        String envValue = environment.getProperty(envKey);
-        if (envValue != null && !envValue.isEmpty()) {
-            try {
-                return Integer.parseInt(envValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-
-        String propKey = "rate-limiter.default-api-key-limit";
-        String propValue = environment.getProperty(propKey);
-        if (propValue != null && !propValue.isEmpty()) {
-            try {
-                return Integer.parseInt(propValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
-        return defaultApiKeyLimit;
+        return readIntProperty("RATE_LIMITER_DEFAULT_API_KEY_LIMIT",
+                "rate-limiter.default-api-key-limit", defaultApiKeyLimit);
     }
 
     public int getEffectiveDefaultApiKeyTimeWindowSeconds() {
-        String envKey = "RATE_LIMITER_DEFAULT_API_KEY_TIME_WINDOW_SECONDS";
-        String envValue = environment.getProperty(envKey);
-        if (envValue != null && !envValue.isEmpty()) {
-            try {
-                return Integer.parseInt(envValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
-        }
+        return readIntProperty("RATE_LIMITER_DEFAULT_API_KEY_TIME_WINDOW_SECONDS",
+                "rate-limiter.default-api-key-time-window-seconds", defaultApiKeyTimeWindowSeconds);
+    }
 
-        String propKey = "rate-limiter.default-api-key-time-window-seconds";
-        String propValue = environment.getProperty(propKey);
-        if (propValue != null && !propValue.isEmpty()) {
-            try {
-                return Integer.parseInt(propValue);
-            } catch (NumberFormatException e) {
-                // Log error
-            }
+    private int readIntProperty(String envKey, String propKey, int fallback) {
+        Integer envValue = parseIntProperty(envKey);
+        if (envValue != null) return envValue;
+        Integer propValue = parseIntProperty(propKey);
+        if (propValue != null) return propValue;
+        return fallback;
+    }
+
+    private Integer parseIntProperty(String key) {
+        String value = environment.getProperty(key);
+        if (value == null || value.isEmpty()) return null;
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            log.warn("Ignoring non-numeric value for rate-limiter property {}: '{}'", key, value);
+            return null;
         }
-        return defaultApiKeyTimeWindowSeconds;
     }
 
     @Data
@@ -313,18 +194,14 @@ public class RateLimitConfig implements EnvironmentAware {
         private int timeWindowSeconds;
         private boolean enabled = true;
 
-        // User-based rate limiting settings
         private int userLimit;
         private int userTimeWindowSeconds;
-        
-        // API key-based rate limiting settings
+
         private int apiKeyLimit;
         private int apiKeyTimeWindowSeconds;
-        
-        // HTTP method-specific rate limits
+
         private Map<String, Integer> methodLimits = new HashMap<>();
-        
-        // Endpoint-specific whitelist and blacklist
+
         private List<String> whitelistedIps = new ArrayList<>();
         private List<String> blacklistedIps = new ArrayList<>();
     }

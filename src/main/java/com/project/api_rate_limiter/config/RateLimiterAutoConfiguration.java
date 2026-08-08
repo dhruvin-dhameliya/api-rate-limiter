@@ -18,4 +18,4 @@ public class RateLimiterAutoConfiguration {
     public ObjectMapper objectMapper() {
         return new ObjectMapper();
     }
-} 
+}
