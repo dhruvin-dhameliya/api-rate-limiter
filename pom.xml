@@ -6,29 +6,52 @@
 		<groupId>org.springframework.boot</groupId>
 		<artifactId>spring-boot-starter-parent</artifactId>
 		<version>3.4.4</version>
-		<relativePath/> <!-- lookup parent from repository -->
+		<relativePath/>
 	</parent>
-	<groupId>com.project</groupId>
+
+	<groupId>io.github.dhruvin-dhameliya</groupId>
 	<artifactId>api-rate-limiter</artifactId>
-	<version>0.0.1-SNAPSHOT</version>
+	<version>0.1.0-SNAPSHOT</version>
+	<packaging>jar</packaging>
+
 	<name>api-rate-limiter</name>
-	<description>API rate limiter of microservices project for Spring Boot</description>
-	<url/>
+	<description>Annotation-driven, sliding-window rate limiting library for Spring Boot 3.x with optional Redis backend, DDoS protection, IP allow/deny and API-key support.</description>
+	<url>https://github.com/dhruvin-dhameliya/api-rate-limiter</url>
+	<inceptionYear>2025</inceptionYear>
+
 	<licenses>
-		<license/>
+		<license>
+			<name>MIT License</name>
+			<url>https://opensource.org/licenses/MIT</url>
+			<distribution>repo</distribution>
+		</license>
 	</licenses>
+
 	<developers>
-		<developer/>
+		<developer>
+			<id>dhruvin-dhameliya</id>
+			<name>Dhruvin Dhameliya</name>
+			<url>https://github.com/dhruvin-dhameliya</url>
+		</developer>
 	</developers>
+
 	<scm>
-		<connection/>
-		<developerConnection/>
-		<tag/>
-		<url/>
+		<connection>scm:git:https://github.com/dhruvin-dhameliya/api-rate-limiter.git</connection>
+		<developerConnection>scm:git:ssh://git@github.com:dhruvin-dhameliya/api-rate-limiter.git</developerConnection>
+		<url>https://github.com/dhruvin-dhameliya/api-rate-limiter</url>
+		<tag>HEAD</tag>
 	</scm>
+
+	<issueManagement>
+		<system>GitHub</system>
+		<url>https://github.com/dhruvin-dhameliya/api-rate-limiter/issues</url>
+	</issueManagement>
+
 	<properties>
 		<java.version>17</java.version>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 	</properties>
+
 	<dependencies>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
@@ -43,6 +66,13 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-data-redis</artifactId>
+			<optional>true</optional>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+			<optional>true</optional>
 		</dependency>
 
 		<dependency>
@@ -61,11 +91,7 @@
 			<groupId>io.github.resilience4j</groupId>
 			<artifactId>resilience4j-spring-boot3</artifactId>
 			<version>2.1.0</version>
-		</dependency>
-
-		<dependency>
-			<groupId>org.springframework.boot</groupId>
-			<artifactId>spring-boot-starter-security</artifactId>
+			<optional>true</optional>
 		</dependency>
 
 		<dependency>
@@ -90,19 +116,84 @@
 					</annotationProcessorPaths>
 				</configuration>
 			</plugin>
+
+			<!-- This is a library, not an executable app - skip Spring Boot's repackage goal. -->
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
-				<configuration>
-					<excludes>
-						<exclude>
-							<groupId>org.projectlombok</groupId>
-							<artifactId>lombok</artifactId>
-						</exclude>
-					</excludes>
-				</configuration>
+				<executions>
+					<execution>
+						<id>repackage</id>
+						<phase>none</phase>
+					</execution>
+				</executions>
 			</plugin>
 		</plugins>
 	</build>
+
+	<profiles>
+		<!--
+		    Activate with `-Prelease` when publishing to Maven Central.
+		    Locally, keeping these plugins out of the default build keeps the loop fast.
+		-->
+		<profile>
+			<id>release</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-source-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>attach-sources</id>
+								<goals>
+									<goal>jar-no-fork</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-javadoc-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>attach-javadocs</id>
+								<goals>
+									<goal>jar</goal>
+								</goals>
+							</execution>
+						</executions>
+						<configuration>
+							<doclint>none</doclint>
+							<failOnError>false</failOnError>
+						</configuration>
+					</plugin>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-gpg-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>sign-artifacts</id>
+								<phase>verify</phase>
+								<goals>
+									<goal>sign</goal>
+								</goals>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.sonatype.central</groupId>
+						<artifactId>central-publishing-maven-plugin</artifactId>
+						<version>0.5.0</version>
+						<extensions>true</extensions>
+						<configuration>
+							<publishingServerId>central</publishingServerId>
+							<autoPublish>false</autoPublish>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>

@@ -2,6 +2,8 @@ package com.project.api_rate_limiter.filter;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.util.List;
+import java.util.UUID;
 
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.core.Ordered;
@@ -29,11 +31,27 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 
+/**
+ * Servlet filter that enforces rate limits and IP allow/deny before the request
+ * reaches any Spring MVC handler. Runs just after the Spring Security chain so
+ * authentication has already populated the request principal.
+ */
 @Component
-@Order(Ordered.HIGHEST_PRECEDENCE + 100) // Run after Spring Security filters
+@Order(Ordered.HIGHEST_PRECEDENCE + 100)
 @ConditionalOnProperty(name = "rate-limiter.enabled", havingValue = "true", matchIfMissing = true)
 @Slf4j
 public class RateLimitFilter extends OncePerRequestFilter {
+
+    /** Marks a request as already counted by this filter, so downstream enforcers can skip it. */
+    public static final String ENFORCED_ATTRIBUTE = "com.project.api_rate_limiter.enforced";
+
+    /** Trace id generated per request; echoed back in {@code X-Trace-ID}. */
+    public static final String TRACE_ID_ATTRIBUTE = "com.project.api_rate_limiter.traceId";
+
+    private static final String[] PROXY_HEADERS = {
+            "X-Forwarded-For", "Proxy-Client-IP", "WL-Proxy-Client-IP",
+            "HTTP_CLIENT_IP", "HTTP_X_FORWARDED_FOR"
+    };
 
     private final RateLimiterService rateLimiterService;
     private final ObjectMapper objectMapper;
@@ -41,8 +59,8 @@ public class RateLimitFilter extends OncePerRequestFilter {
     private final IpFilterService ipFilterService;
     private final RateLimitConfig config;
 
-    public RateLimitFilter(RateLimiterService rateLimiterService, 
-                          ObjectMapper objectMapper, 
+    public RateLimitFilter(RateLimiterService rateLimiterService,
+                          ObjectMapper objectMapper,
                           RequestMappingHandlerMapping handlerMapping,
                           IpFilterService ipFilterService,
                           RateLimitConfig config) {
@@ -56,128 +74,81 @@ public class RateLimitFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
             throws ServletException, IOException {
-        
-        String clientIp = getClientIp(request);
+
+        String traceId = UUID.randomUUID().toString();
+        request.setAttribute(TRACE_ID_ATTRIBUTE, traceId);
+        response.setHeader("X-Trace-ID", traceId);
+
+        String clientIp = resolveClientIp(request, config.getTrustedProxies());
         String endpoint = normalizeEndpoint(request.getRequestURI());
-        
-        // Check if IP filtering is enabled
+
         if (config.isEnableIpFiltering()) {
-            // Check if the IP is blacklisted
-            if (ipFilterService.isBlacklisted(clientIp)) {
+            if (ipFilterService.isBlacklistedFor(clientIp, endpoint)) {
                 log.warn("Request from blacklisted IP {} blocked for endpoint {}", clientIp, endpoint);
-                response.setStatus(HttpStatus.FORBIDDEN.value());
-                response.setContentType("application/json");
-                
-                ErrorResponse errorResponse = new ErrorResponse(
-                        HttpStatus.FORBIDDEN.value(),
-                        "Forbidden",
+                writeError(response, HttpStatus.FORBIDDEN, "Forbidden",
                         "Access denied: Your IP address is blacklisted",
-                        request.getRequestURI()
-                );
-                
-                objectMapper.writeValue(response.getOutputStream(), errorResponse);
+                        request.getRequestURI(), traceId);
                 return;
             }
-            
-            // Check if the IP is whitelisted (bypass rate limiting)
-            if (ipFilterService.isWhitelisted(clientIp)) {
+            if (ipFilterService.isWhitelistedFor(clientIp, endpoint)) {
                 log.debug("Request from whitelisted IP {} bypassing rate limiting for endpoint {}", clientIp, endpoint);
+                // Mark so the aspect on the controller method also skips — otherwise
+                // a whitelisted IP would still get counted by @RateLimit on the handler.
+                request.setAttribute(ENFORCED_ATTRIBUTE, Boolean.TRUE);
                 filterChain.doFilter(request, response);
                 return;
             }
         }
-        
+
         try {
-            // Try to find the handler method to check for annotations
             HandlerMethod handlerMethod = getHandlerMethod(request);
             if (handlerMethod != null) {
-                processWithAnnotation(request, response, filterChain, clientIp, endpoint, handlerMethod);
+                Method method = handlerMethod.getMethod();
+                RateLimit rateLimit = method.getAnnotation(RateLimit.class);
+                if (rateLimit == null) {
+                    rateLimit = method.getDeclaringClass().getAnnotation(RateLimit.class);
+                }
+                if (rateLimit != null) {
+                    if (!rateLimiterService.isMethodAllowed(request, rateLimit.methods())) {
+                        filterChain.doFilter(request, response);
+                        return;
+                    }
+                    rateLimiterService.allowRequestWithType(clientIp, endpoint,
+                            rateLimit.limit(), rateLimit.timeWindowSeconds(),
+                            rateLimit.type(), request);
+                } else {
+                    rateLimiterService.allowRequestWithType(clientIp, endpoint, 0, 0,
+                            RateLimitType.IP_BASED, request);
+                }
             } else {
-                // No handler method found, use default IP-based rate limiting
-                rateLimiterService.allowRequest(clientIp, endpoint);
-                filterChain.doFilter(request, response);
+                rateLimiterService.allowRequestWithType(clientIp, endpoint, 0, 0,
+                        RateLimitType.IP_BASED, request);
             }
+            request.setAttribute(ENFORCED_ATTRIBUTE, Boolean.TRUE);
         } catch (RateLimitExceededException e) {
-            log.warn("Rate limit exceeded for client {} on endpoint {}: {}", 
+            log.warn("Rate limit exceeded for client {} on endpoint {}: {}",
                     clientIp, endpoint, e.getMessage());
-
-            response.setStatus(HttpStatus.TOO_MANY_REQUESTS.value());
-            response.setContentType("application/json");
             response.setHeader("X-RateLimit-Limit", String.valueOf(e.getLimit()));
             response.setHeader("X-RateLimit-Remaining", String.valueOf(e.getRemaining()));
             response.setHeader("Retry-After", String.valueOf(e.getWaitTimeSeconds()));
-
-            ErrorResponse errorResponse = new ErrorResponse(
-                    HttpStatus.TOO_MANY_REQUESTS.value(),
-                    "Too Many Requests",
-                    e.getMessage(),
-                    request.getRequestURI()
-            );
-
-            objectMapper.writeValue(response.getOutputStream(), errorResponse);
+            writeError(response, HttpStatus.TOO_MANY_REQUESTS, "Too Many Requests",
+                    e.getMessage(), request.getRequestURI(), traceId);
+            return;
         } catch (UnauthorizedException e) {
-            log.warn("Unauthorized request for client {} on endpoint {}: {}", 
+            log.warn("Unauthorized request for client {} on endpoint {}: {}",
                     clientIp, endpoint, e.getMessage());
-
-            response.setStatus(HttpStatus.UNAUTHORIZED.value());
-            response.setContentType("application/json");
-
-            ErrorResponse errorResponse = new ErrorResponse(
-                    HttpStatus.UNAUTHORIZED.value(),
-                    "Unauthorized",
-                    e.getMessage(),
-                    request.getRequestURI()
-            );
-
-            objectMapper.writeValue(response.getOutputStream(), errorResponse);
+            writeError(response, HttpStatus.UNAUTHORIZED, "Unauthorized",
+                    e.getMessage(), request.getRequestURI(), traceId);
+            return;
         } catch (Exception e) {
-            log.error("Error in rate limit filter", e);
-            filterChain.doFilter(request, response);
+            // Fail-open: log and pass the request through untouched. The chain is
+            // invoked exactly once below, so downstream exceptions cannot loop back here.
+            log.error("Error in rate limit check — failing open", e);
         }
-    }
-    
-    private void processWithAnnotation(HttpServletRequest request, HttpServletResponse response, 
-                                      FilterChain filterChain, String clientIp, String endpoint, 
-                                      HandlerMethod handlerMethod) 
-            throws ServletException, IOException, RateLimitExceededException {
-        
-        Method method = handlerMethod.getMethod();
-        RateLimit rateLimit = method.getAnnotation(RateLimit.class);
-        
-        // If no method annotation, check class annotation
-        if (rateLimit == null) {
-            rateLimit = method.getDeclaringClass().getAnnotation(RateLimit.class);
-        }
-        
-        if (rateLimit != null) {
-            // Check if the HTTP method is allowed for rate limiting
-            if (!rateLimiterService.isMethodAllowed(request, rateLimit.methods())) {
-                // Method not specified in the annotation, skip rate limiting
-                filterChain.doFilter(request, response);
-                return;
-            }
-            
-            // Apply rate limiting based on the annotation type
-            RateLimitType type = rateLimit.type();
-            int limit = rateLimit.limit();
-            int timeWindow = rateLimit.timeWindowSeconds();
-            
-            // If using DDoS protection
-            if (rateLimit.ddosProtection() && type == RateLimitType.IP_BASED) {
-                // Set DDoS protection parameters from annotation
-                // Implementation detail: these settings would be applied to the DdosProtectionService
-            }
-            
-            rateLimiterService.allowRequestWithType(clientIp, endpoint, limit, timeWindow, type, request);
-        } else {
-            // No annotation found, use default IP-based rate limiting
-            rateLimiterService.allowRequest(clientIp, endpoint);
-        }
-        
+
         filterChain.doFilter(request, response);
     }
-    
-    // Get the HandlerMethod for the current request to check for annotations
+
     private HandlerMethod getHandlerMethod(HttpServletRequest request) {
         try {
             HandlerExecutionChain handlerChain = handlerMapping.getHandler(request);
@@ -189,33 +160,59 @@ public class RateLimitFilter extends OncePerRequestFilter {
         }
         return null;
     }
-    
-    // Get the client IP address from the request
-    private String getClientIp(HttpServletRequest request) {
-        String ip = request.getHeader("X-Forwarded-For");
-        if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-            ip = request.getHeader("Proxy-Client-IP");
-        }
-        if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-            ip = request.getHeader("WL-Proxy-Client-IP");
-        }
-        if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-            ip = request.getHeader("HTTP_CLIENT_IP");
-        }
-        if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-            ip = request.getHeader("HTTP_X_FORWARDED_FOR");
-        }
-        if (ip == null || ip.isEmpty() || "unknown".equalsIgnoreCase(ip)) {
-            ip = request.getRemoteAddr();
-        }
-        return ip;
+
+    private void writeError(HttpServletResponse response, HttpStatus status, String error,
+                            String message, String path, String traceId) throws IOException {
+        response.setStatus(status.value());
+        response.setContentType("application/json");
+        ErrorResponse body = new ErrorResponse(status.value(), error, message, path);
+        body.setTraceId(traceId);
+        objectMapper.writeValue(response.getOutputStream(), body);
     }
 
+    /** Normalises the request URI into a bucket-key fragment ({@code /api/v1/x} → {@code api-v1-x}). */
     private String normalizeEndpoint(String uri) {
         if (uri == null || uri.isEmpty()) {
             return "";
         }
-        // Remove leading slash and replace subsequent slashes with hyphens
         return uri.startsWith("/") ? uri.substring(1).replace('/', '-') : uri.replace('/', '-');
+    }
+
+    /**
+     * Extract the client IP, respecting an optional trusted-proxies allowlist.
+     * When {@code trustedProxies} is non-empty and the immediate connection did
+     * not come from a trusted proxy, proxy headers are ignored.
+     */
+    public static String resolveClientIp(HttpServletRequest request, List<String> trustedProxies) {
+        String remote = request.getRemoteAddr();
+        boolean trustHeaders = trustedProxies == null || trustedProxies.isEmpty()
+                || trustedProxies.contains(remote);
+        if (!trustHeaders) {
+            return remote;
+        }
+
+        for (String header : PROXY_HEADERS) {
+            String value = request.getHeader(header);
+            if (value == null || value.isEmpty() || "unknown".equalsIgnoreCase(value)) {
+                continue;
+            }
+            // X-Forwarded-For may be "client, proxy1, proxy2" — first entry is the originating client.
+            int comma = value.indexOf(',');
+            String ip = (comma > 0 ? value.substring(0, comma) : value).trim();
+            if (!ip.isEmpty() && !"unknown".equalsIgnoreCase(ip)) {
+                return ip;
+            }
+        }
+        return remote;
+    }
+
+    /**
+     * Convenience overload that reads proxy headers unconditionally. Prefer
+     * {@link #resolveClientIp(HttpServletRequest, List)} with a trusted-proxies
+     * list — this one is safe only when the app cannot be reached directly by
+     * untrusted clients.
+     */
+    public static String extractClientIp(HttpServletRequest request) {
+        return resolveClientIp(request, List.of());
     }
 }
