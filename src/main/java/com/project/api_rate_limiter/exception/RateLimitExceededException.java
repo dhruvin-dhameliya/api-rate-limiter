@@ -21,5 +21,4 @@ public class RateLimitExceededException extends RuntimeException {
     public RateLimitExceededException(String message, long waitTimeSeconds) {
         this(message, waitTimeSeconds, 0, 0);
     }
-
 }

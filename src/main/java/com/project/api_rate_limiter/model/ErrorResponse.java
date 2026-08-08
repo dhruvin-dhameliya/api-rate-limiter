@@ -14,7 +14,7 @@ public class ErrorResponse {
     private String message;
     private String path;
     private long timestamp;
-    private String traceId; // For correlating logs
+    private String traceId;
 
     public ErrorResponse(int status, String error, String message, String path) {
         this.status = status;

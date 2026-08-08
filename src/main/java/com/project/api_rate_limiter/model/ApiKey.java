@@ -6,9 +6,6 @@ import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
 
-/**
- * Model representing an API key for rate limiting purposes.
- */
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -20,4 +17,4 @@ public class ApiKey {
     private boolean enabled;
     private LocalDateTime createdAt;
     private LocalDateTime expiresAt;
-} 
+}
