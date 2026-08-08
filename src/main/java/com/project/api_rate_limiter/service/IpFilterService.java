@@ -5,21 +5,23 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import com.project.api_rate_limiter.config.RateLimitConfig;
+import com.project.api_rate_limiter.config.RateLimitConfig.EndpointLimit;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import lombok.extern.slf4j.Slf4j;
 
 @Service
 @Slf4j
 public class IpFilterService {
-    
+
     private final Set<String> whitelistedIps = new HashSet<>();
     private final Set<String> blacklistedIps = new HashSet<>();
-    
+
     @Autowired
     private RateLimitConfig config;
-    
+
     @PostConstruct
     public void init() {
         if (config.getWhitelistedIps() != null) {
@@ -38,6 +40,31 @@ public class IpFilterService {
 
     public boolean isBlacklisted(String ipAddress) {
         return blacklistedIps.contains(ipAddress);
+    }
+
+    /**
+     * Whitelisted for a specific endpoint. Endpoint-specific list wins;
+     * if empty, falls back to the global whitelist.
+     */
+    public boolean isWhitelistedFor(String ipAddress, String endpoint) {
+        EndpointLimit ep = config.getEffectiveEndpointLimit(endpoint);
+        List<String> perEndpoint = ep.getWhitelistedIps();
+        if (perEndpoint != null && !perEndpoint.isEmpty()) {
+            return perEndpoint.contains(ipAddress);
+        }
+        return isWhitelisted(ipAddress);
+    }
+
+    /**
+     * Blacklisted for a specific endpoint. Endpoint-specific list is
+     * checked in addition to the global list — an IP is blocked if either
+     * list contains it.
+     */
+    public boolean isBlacklistedFor(String ipAddress, String endpoint) {
+        if (isBlacklisted(ipAddress)) return true;
+        EndpointLimit ep = config.getEffectiveEndpointLimit(endpoint);
+        List<String> perEndpoint = ep.getBlacklistedIps();
+        return perEndpoint != null && perEndpoint.contains(ipAddress);
     }
 
     public boolean addToWhitelist(String ipAddress) {
@@ -69,7 +96,8 @@ public class IpFilterService {
     public Set<String> getWhitelistedIps() {
         return new HashSet<>(whitelistedIps);
     }
+
     public Set<String> getBlacklistedIps() {
         return new HashSet<>(blacklistedIps);
     }
-} 
+}

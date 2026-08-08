@@ -9,18 +9,16 @@ import com.project.api_rate_limiter.config.RateLimitConfig;
 import com.project.api_rate_limiter.config.RateLimitConfig.EndpointLimit;
 import com.project.api_rate_limiter.exception.RateLimitExceededException;
 import com.project.api_rate_limiter.exception.UnauthorizedException;
+import com.project.api_rate_limiter.filter.RateLimitFilter;
 import com.project.api_rate_limiter.redis.RedisRateLimiter;
 
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 
 /**
- * Service that handles rate limiting logic using Sliding Window algorithm.
- * Configuration priority order:
- * 1. Environment variables (highest priority)
- * 2. application.properties configuration
- * 3. Annotation values (@RateLimit)
- * 4. Default configuration (lowest priority)
+ * Central admission service. Picks the effective limit for a request from
+ * (in precedence order) endpoint config, {@code @RateLimit} annotation, and
+ * global defaults; then delegates to the active {@code RateLimitAlgorithm}.
  */
 @Service
 @Slf4j
@@ -45,16 +43,6 @@ public class RateLimiterService {
         this.slidingWindowAlgorithm = slidingWindowAlgorithm;
     }
 
-    public void allowRequest(String clientId, String endpoint) throws RateLimitExceededException {
-        allowRequestWithType(clientId, endpoint, 0, 0, RateLimitType.IP_BASED, null);
-    }
-
-    public void allowRequest(String clientId, String endpoint,
-                             int annotationLimit, int annotationTimeWindow)
-            throws RateLimitExceededException {
-        allowRequestWithType(clientId, endpoint, annotationLimit, annotationTimeWindow, RateLimitType.GLOBAL, null);
-    }
-
     public void allowRequestWithType(String clientId, String endpoint,
                                      int annotationLimit, int annotationTimeWindow,
                                      RateLimitType type, HttpServletRequest request)
@@ -63,11 +51,13 @@ public class RateLimiterService {
             return;
         }
 
-        // Check DDoS protection if enabled
-        if (request != null && type == RateLimitType.IP_BASED) {
-            if (!ddosProtectionService.trackRequest(clientId)) {
+        // DDoS is always IP-scoped — the supplied clientId may be a user id
+        // or SpEL result, so we resolve the IP from the request directly.
+        if (request != null && config.getEffectiveDdosProtectionEnabled()) {
+            String ip = RateLimitFilter.resolveClientIp(request, config.getTrustedProxies());
+            if (!ddosProtectionService.trackRequest(ip)) {
                 throw new RateLimitExceededException(
-                        "Request blocked due to DDoS protection. Your IP has been temporarily banned.", 
+                        "Request blocked due to DDoS protection. Your IP has been temporarily banned.",
                         ddosProtectionService.getBanDurationSeconds());
             }
         }
@@ -89,8 +79,6 @@ public class RateLimiterService {
         int timeWindow;
 
         if (type == RateLimitType.API_KEY_BASED && config.isApiKeyBasedLimitingEnabled()) {
-            String apiKeyValue = getApiKeyFromRequest(request);
-            // API key is valid, use API key-specific limits with priority
             if (endpointLimit.getApiKeyLimit() > 0) {
                 limit = endpointLimit.getApiKeyLimit();
                 timeWindow = endpointLimit.getApiKeyTimeWindowSeconds() > 0
@@ -105,9 +93,24 @@ public class RateLimiterService {
                 limit = config.getEffectiveDefaultApiKeyLimit();
                 timeWindow = config.getEffectiveDefaultApiKeyTimeWindowSeconds();
             }
+        } else if (type == RateLimitType.USER_BASED && endpointLimit.getUserLimit() > 0) {
+            limit = endpointLimit.getUserLimit();
+            timeWindow = endpointLimit.getUserTimeWindowSeconds() > 0
+                    ? endpointLimit.getUserTimeWindowSeconds()
+                    : config.getEffectiveDefaultTimeWindowSeconds();
         } else {
-            // Determine the effective rate limit parameters for other types
-            if (endpointLimit.getLimit() > 0) {
+            // Per-method override wins over the endpoint's blanket limit when set.
+            Integer methodLimit = null;
+            if (request != null && endpointLimit.getMethodLimits() != null) {
+                methodLimit = endpointLimit.getMethodLimits().get(request.getMethod());
+            }
+
+            if (methodLimit != null && methodLimit > 0) {
+                limit = methodLimit;
+                timeWindow = endpointLimit.getTimeWindowSeconds() > 0
+                        ? endpointLimit.getTimeWindowSeconds()
+                        : config.getEffectiveDefaultTimeWindowSeconds();
+            } else if (endpointLimit.getLimit() > 0) {
                 limit = endpointLimit.getLimit();
                 timeWindow = endpointLimit.getTimeWindowSeconds() > 0
                         ? endpointLimit.getTimeWindowSeconds()
@@ -122,8 +125,8 @@ public class RateLimiterService {
                 timeWindow = config.getEffectiveDefaultTimeWindowSeconds();
             }
         }
-        
-        log.debug("Using rate limit: {} requests per {} seconds for endpoint {} with type {}", 
+
+        log.debug("Using rate limit: {} requests per {} seconds for endpoint {} with type {}",
                 limit, timeWindow, endpoint, type);
 
         checkRateLimit(key, endpoint, limit, timeWindow, type, clientId);
@@ -146,11 +149,11 @@ public class RateLimiterService {
 
         if (config.isEnableRedis() && redisRateLimiter != null) {
             allowed = redisRateLimiter.allowRequest(key, limit, timeWindow);
-            waitTime = allowed ? 0 : redisRateLimiter.getWaitTimeSeconds(key);
+            waitTime = allowed ? 0 : redisRateLimiter.getWaitTimeSeconds(key, timeWindow);
             remainingRequests = allowed ? redisRateLimiter.getRemainingRequests(key, limit) : 0;
         } else {
             allowed = slidingWindowAlgorithm.allowRequest(key, limit, timeWindow);
-            waitTime = allowed ? 0 : slidingWindowAlgorithm.getWaitTimeSeconds(key);
+            waitTime = allowed ? 0 : slidingWindowAlgorithm.getWaitTimeSeconds(key, timeWindow);
             remainingRequests = allowed ? slidingWindowAlgorithm.getRemainingRequests(key, limit) : 0;
         }
         if (!allowed) {
