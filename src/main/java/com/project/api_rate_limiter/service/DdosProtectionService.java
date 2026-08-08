@@ -1,7 +1,10 @@
 package com.project.api_rate_limiter.service;
 
-import lombok.Setter;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import org.springframework.stereotype.Service;
+
+import com.project.api_rate_limiter.config.RateLimitConfig;
 
 import java.time.LocalDateTime;
 import java.util.Map;
@@ -10,24 +13,40 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 @Service
+@RequiredArgsConstructor
 @Slf4j
 public class DdosProtectionService {
     private final Map<String, Integer> requestCounts = new ConcurrentHashMap<>();
     private final Map<String, LocalDateTime> bannedIps = new ConcurrentHashMap<>();
-    @Setter
-    private int ddosThreshold = 1000;
-    @Setter
-    private int ddosBanDurationSeconds = 3600; // 1 hour
-    @Setter
-    private int countResetIntervalSeconds = 60; // Reset counts every minute
-    
-    public DdosProtectionService() {
-        ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+    private final RateLimitConfig config;
+    private ScheduledExecutorService scheduler;
+
+    @PostConstruct
+    public void init() {
+        // Skip the reset thread entirely when DDoS protection is off — no counters
+        // are being written, so nothing needs clearing.
+        if (!config.getEffectiveDdosProtectionEnabled()) {
+            return;
+        }
+        int resetInterval = config.getEffectiveDdosCountResetIntervalSeconds();
+        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "ddos-counter-reset");
+            t.setDaemon(true);
+            return t;
+        });
         scheduler.scheduleAtFixedRate(this::resetRequestCounts,
-                countResetIntervalSeconds, countResetIntervalSeconds, TimeUnit.SECONDS);
+                resetInterval, resetInterval, TimeUnit.SECONDS);
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        if (scheduler != null) {
+            scheduler.shutdownNow();
+        }
     }
 
     public boolean isBanned(String ipAddress) {
@@ -47,9 +66,11 @@ public class DdosProtectionService {
     public boolean trackRequest(String ipAddress) {
         if (isBanned(ipAddress)) return false;
         int count = requestCounts.compute(ipAddress, (k, v) -> v == null ? 1 : v + 1);
-        if (count > ddosThreshold) {
+        int threshold = config.getEffectiveDdosThreshold();
+        if (count > threshold) {
+            int banDuration = config.getEffectiveDdosBanDurationSeconds();
             log.warn("Possible DDoS attack detected from IP: {}. Request count: {}", ipAddress, count);
-            banIp(ipAddress, ddosBanDurationSeconds);
+            banIp(ipAddress, banDuration);
             return false;
         }
         return true;
@@ -62,10 +83,15 @@ public class DdosProtectionService {
     }
 
     private void resetRequestCounts() {
-        requestCounts.clear();
+        // Swallow: scheduleAtFixedRate cancels the task permanently if it throws.
+        try {
+            requestCounts.clear();
+        } catch (Exception e) {
+            log.error("Failed to reset DDoS request counters", e);
+        }
     }
 
     public int getBanDurationSeconds() {
-        return ddosBanDurationSeconds;
+        return config.getEffectiveDdosBanDurationSeconds();
     }
-} 
+}
